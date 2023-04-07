@@ -80,29 +80,37 @@ HOST_AND_DEVICE void ComputeGradientsElement(
   }
 
   CAST_DTYPE c = alphas[idx_b_t_u] + cost - denominators[idx_b_t_u];
+ if (fusedLogSmax) {
+  for (int d = 0; d < D; d++) {
+    int b_t_u_d = idx_b_t_u * D + d;
+    
+    CAST_DTYPE g = CAST_DTYPE(logits[b_t_u_d]) + c;
+    
+    gradients[b_t_u_d] = std::exp(g + betas[idx_b_t_u]);
+    if (d == blank && t == T - 1 && u == U - 1) { // last blank transition.
+       //printf("a1\n");
+      gradients[b_t_u_d] = gradients[b_t_u_d] - std::exp(g);
+    } else if (t < T - 1 && d == blank && idx_b_tp1_u != -1) {
+         //printf("b1\n");
+      gradients[b_t_u_d] = gradients[b_t_u_d] - std::exp(g + betas[idx_b_tp1_u]);
+    } else if (u < U - 1 && d == targets[idxr2(bTgt, u)] && idx_b_t_up1 != -1) {
+        // printf("c1\n");
+      gradients[b_t_u_d] = gradients[b_t_u_d] - std::exp(g + betas[idx_b_t_up1]);
+    }
+    
+    if (clamp > 0) {
+      printf("clamp\n");
+      auto g = CAST_DTYPE(grad);
+      gradients[b_t_u_d] = math::min(g, clamp);
+      gradients[b_t_u_d] = math::max(g, -clamp);
+    } 
+    //gradients[b_t_u_d] = grad;
+  } 
+  } else {
   for (int d = 0; d < D; ++d) {
     int b_t_u_d = idx_b_t_u * D + d;
-    CAST_DTYPE g = CAST_DTYPE(logits[b_t_u_d]) + c;
 
-    if (fusedLogSmax) {
-      if (d == blank && t == T - 1 && u == U - 1) { // last blank transition.
-        gradients[b_t_u_d] = std::exp(g + betas[idx_b_t_u]) - std::exp(g);
-      } else if (t < T - 1 && d == blank) {
-        gradients[b_t_u_d] = std::exp(g + betas[idx_b_t_u]);
-        if (idx_b_tp1_u != -1) {
-          gradients[b_t_u_d] =
-              gradients[b_t_u_d] - std::exp(g + betas[idx_b_tp1_u]);
-        }
-      } else if (u < U - 1 && d == targets[idxr2(bTgt, u)]) {
-        gradients[b_t_u_d] = std::exp(g + betas[idx_b_t_u]);
-        if (idx_b_t_up1 != -1) {
-          gradients[b_t_u_d] =
-              gradients[b_t_u_d] - std::exp(g + betas[idx_b_t_up1]);
-        }
-      } else {
-        gradients[b_t_u_d] = std::exp(g + betas[idx_b_t_u]);
-      }
-    } else { // Non fused log softmax case
+   // Non fused log softmax case
       CAST_DTYPE g = cost + CAST_DTYPE(logits[b_t_u_d]);
       if (d == blank && t == T - 1 && u == U - 1) {
         gradients[b_t_u_d] = g + alphas[idx_b_t_u];
@@ -122,13 +130,13 @@ HOST_AND_DEVICE void ComputeGradientsElement(
         gradients[b_t_u_d] = g + CAST_DTYPE(-INFINITY);
       }
       gradients[b_t_u_d] = -std::exp(gradients[b_t_u_d]);
-    }
 
     if (clamp > 0) {
       auto g = CAST_DTYPE(gradients[b_t_u_d]);
       gradients[b_t_u_d] = math::min(g, clamp);
       gradients[b_t_u_d] = math::max(g, -clamp);
     }
+  }
   }
 }
 
