@@ -61,6 +61,7 @@ struct Vec4T<float> {
     acc.w = p[3];
   }
 
+
   DEVICE_INLINE void store(float* p) {
     *((float4*)p) = acc;
   }
@@ -154,39 +155,65 @@ HOST_AND_DEVICE void ComputeGradientsElement(
     return;
   }
 
-  CAST_DTYPE c = alphas[idx_b_t_u] + cost - denominators[idx_b_t_u];
-  DTYPE grad;
-  if (fusedLogSmax) {
-  for (int d = 0; d*4 < D; d++) {
-  //for (int d = 0; d < D; d++) {
-    //int b_t_u_d = idx_b_t_u * D + d;
-     int b_t_u_d = idx_b_t_u * D + d*4;
-    //CAST_DTYPE g = CAST_DTYPE(logits[b_t_u_d]) + c;
-    Vec4T<CAST_DTYPE> g_vec(reinterpret_cast<const CAST_DTYPE*>(&logits[b_t_u_d]), CAST_DTYPE(c));
-    Vec4T<CAST_DTYPE> grad_vec;
-    grad_vec.element_wise_exp_(g_vec, betas[idx_b_t_u]);
-    grad_vec.store(&gradients[b_t_u_d]);
-    
-    //grad = std::exp(g + betas[idx_b_t_u]);
-      // if (d == blank && t == T - 1 && u == U - 1) { // last blank transition.
-      // //printf("a1\n");
-      //   grad = grad - std::exp(g);
-      // } else if (t < T - 1 && d == blank && idx_b_tp1_u != -1) {
-      //   //printf("b1\n");
-      //     grad = grad - std::exp(g + betas[idx_b_tp1_u]);
-      // } else if (u < U - 1 && d == targets[idxr2(bTgt, u)] && idx_b_t_up1 != -1) {
-      //  // printf("c1\n");
-      //     grad = grad - std::exp(g + betas[idx_b_t_up1]);
-      // }
-    
-    if (clamp > 0) {
-      printf("clamp\n");
-      auto g = CAST_DTYPE(grad);
-      grad = math::min(g, clamp);
-      grad = math::max(g, -clamp);
+ if (fusedLogSmax) {
+    CAST_DTYPE c = alphas[idx_b_t_u] + cost - denominators[idx_b_t_u];
+    DTYPE grad;
+    CAST_DTYPE g;
+    int b_t_u_d;
+    int remainder = D - (D % 4);
+
+    for (int d = 0; d*4 < D; d++) {
+      b_t_u_d = idx_b_t_u * D + d*4;
+      
+      Vec4T<CAST_DTYPE> g_vec(reinterpret_cast<const CAST_DTYPE*>(&logits[b_t_u_d]), CAST_DTYPE(c));
+      Vec4T<CAST_DTYPE> grad_vec;
+      grad_vec.element_wise_exp_(g_vec, betas[idx_b_t_u]);
+      grad_vec.store(&gradients[b_t_u_d]);
+
+      //TODO: Need to address clamp in vectorized approach
+      if (clamp > 0) {
+        printf("clamp\n");
+        auto g = CAST_DTYPE(grad);
+        grad = math::min(g, clamp);
+        grad = math::max(g, -clamp);
+      } 
+      //gradients[b_t_u_d] = grad;
     } 
-    //gradients[b_t_u_d] = grad;
-  } 
+
+    //Perform any remaining updates for non-uniform phoneme datasets
+    for (int d = remainder; d < D; d++){
+      b_t_u_d = idx_b_t_u * D + d;
+      g = CAST_DTYPE(logits[b_t_u_d]) + c;
+      grad = std::exp(g + betas[idx_b_t_u]);
+      gradients[b_t_u_d] = grad;
+    }
+
+    // targets index is only calculated once per thread, and only a single 'd' will match it.  
+    // Therefor we should only ever have one hit per d < D.  Lets just check it at the end of the 
+    // loop and perform any necessary actions
+    int target = targets[idxr2(bTgt, u)];
+    if (u < U - 1 && idx_b_t_up1 != -1){
+      b_t_u_d = idx_b_t_u * D + target;
+      g = CAST_DTYPE(logits[b_t_u_d]) + c;
+      grad = std::exp(g + betas[idx_b_t_up1]);
+      gradients[b_t_u_d] = gradients[b_t_u_d] - grad;
+    }
+
+    // Perform Blank check as it should only be once per loop, and we shouldn't always check it
+    // On the same note.  The previous loop already calculated the  std::exp(g + betas[idx_b_t_u]);
+    // So we only need to perform the additional std::exp subtraction if required
+    if (t == T - 1 && u == U - 1) { // last blank transition.
+      b_t_u_d = idx_b_t_u * D + blank;
+      g = CAST_DTYPE(logits[b_t_u_d]) + c;
+      grad = std::exp(g);
+      gradients[b_t_u_d] = gradients[b_t_u_d] - grad;
+    } else if (t < T - 1 && idx_b_tp1_u != -1) {
+      b_t_u_d = idx_b_t_u * D + blank;
+      g = CAST_DTYPE(logits[b_t_u_d]) + c;
+      grad = std::exp(g + betas[idx_b_tp1_u]);
+      gradients[b_t_u_d] = gradients[b_t_u_d] - grad;
+    }
+
   } else {
   for (int d = 0; d < D; ++d) {
     int b_t_u_d = idx_b_t_u * D + d;
